@@ -1,42 +1,89 @@
 #!/usr/bin/env python3
-""" Module for Redis db """
+"""Redis Cache Class"""
+from typing import Any, Callable, Union
 import redis
 from uuid import uuid4
-from typing import Union, Callable, Optional
+from functools import wraps
 
 
-UnionOfTypes = Union[str, bytes, int, float]
+def count_calls(f: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(f)
+    def wrapper(self, *args: Any, **kwargs: Any) -> Any:
+        self._redis.incrby(f.__qualname__, 1)
+        return f(self, *args, **kwargs)
+    return wrapper
+
+
+def call_history(f: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(f)
+    def wrapper(self, *args: Any, **kwargs: Any) -> Any:
+        in_key = f'{f.__qualname__}:inputs'
+        out_key = f'{f.__qualname__}:outputs'
+        self._redis.rpush(in_key, str(*args))
+        output = f(self, *args)
+        self._redis.rpush(out_key, output)
+        return output
+    return wrapper
 
 
 class Cache:
-    """ Class for methods that operate a caching system """
-
-    def __init__(self):
-        """ Instance of the Redis db """
+    def __init__(self) -> None:
         self._redis = redis.Redis()
         self._redis.flushdb()
 
-    def store(self, data: UnionOfTypes) -> str:
-        """
-        Method takes a data argument and returns a string
-        """
-        self._key = str(uuid4())
-        self._redis.set(self._key, data)
-        return self._key
+    @call_history
+    @count_calls
+    def store(self, data: Union[str, float, int, bytes]) -> str:
+        key = str(uuid4())
+        self._redis.set(key, data)
+        return key
 
-    def get(self, key: str,
-            fn: Optional[Callable] = None) -> UnionOfTypes:
-        """
-        Retrieves data stored in redis using a key
-        converts the result/value back to the desired format
-        """
+    def get(self, key: str, fn: Callable = None) -> Union[str, float, int, bytes]:
         value = self._redis.get(key)
         return fn(value) if fn else value
 
-    def get_str(self, value: str) -> str:
-        """ get a string """
-        return self.get(self._key, str)
+    def get_str(self, key: str) -> str:
+        return self.get(key, fn=lambda v: v.decode('utf-8'))
 
-    def get_int(self, value: str) -> int:
-        """ get an int """
-        return self.get(self._key, int)
+    def get_int(self, key: str) -> int:
+        return self.get(key, fn=lambda v: int(v))
+
+
+def replay(f):
+    key = f.__qualname__
+    in_key = key + ':inputs'
+    out_key = key + ':outputs'
+    count = f.__self__.get_int(key)
+    redis = f.__self__._redis
+    inputs = redis.lrange(in_key, 0, -1)
+    outputs = redis.lrange(out_key, 0, -1)
+    print(f'Cache.store was called {count} times')
+    for input, output in zip(inputs, outputs):
+        output = output.decode('utf-8')
+        input = input.decode('utf-8')
+        print(f"Cache.store(*({input},)) -> {output}")
+
+# cache = Cache()
+
+# s1 = cache.store("first")
+# print(s1)
+# s2 = cache.store("secont")
+# print(s2)
+# s3 = cache.store("third")
+# print(s3)
+
+# inputs = cache._redis.lrange(
+#     "{}:inputs".format(cache.store.__qualname__), 0, -1)
+# outputs = cache._redis.lrange(
+#     "{}:outputs".format(cache.store.__qualname__), 0, -1)
+
+
+# print("inputs: {}".format(inputs))
+# print("outputs: {}".format(outputs))
+
+# from exercise import replay, Cache
+cache = Cache()
+cache.store('foo')
+cache.store('bar')
+cache.store(42)
+replay(cache.store)
